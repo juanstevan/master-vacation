@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Crawl output: raw HTML, spreadsheets, RAG corpus. Regenerate, don't commit.
+data/
+demo_data/
+*.xlsx
+*.csv
