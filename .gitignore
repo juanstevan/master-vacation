@@ -8,3 +8,5 @@ data/
 demo_data/
 *.xlsx
 *.csv
+
+.DS_Store

@@ -108,6 +108,33 @@ class PoliteSession:
             time.sleep(random.uniform(0, self.s.jitter))
         self._last_request = time.monotonic()
 
+    # ------------------------------------------------------------------ post
+    def post_json(self, url: str, data: dict,
+                  headers: Optional[dict] = None, retries: int = 2):
+        """POST a form and return the decoded JSON body, or None."""
+        for attempt in range(retries + 1):
+            self._throttle(url)
+            try:
+                resp = self.session.post(
+                    url, data=data, timeout=self.s.timeout,
+                    headers={"X-Requested-With": "XMLHttpRequest",
+                             "Accept": "application/json, text/javascript, */*; q=0.01",
+                             **(headers or {})},
+                )
+            except requests.RequestException as exc:
+                log.warning("POST %s -> %s", url, exc)
+                time.sleep(2 ** attempt)
+                continue
+            if resp.status_code in RETRY_STATUS and attempt < retries:
+                time.sleep(2 ** attempt)
+                continue
+            try:
+                return resp.json()
+            except ValueError:
+                log.debug("POST %s -> non-JSON (HTTP %s)", url, resp.status_code)
+                return None
+        return None
+
     # ------------------------------------------------------------------- get
     def get(
         self,

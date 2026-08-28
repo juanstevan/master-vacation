@@ -44,9 +44,12 @@ def run() -> int:
         assert rows["2014"]["pets"] == "No"
         assert rows["3302"]["community"] == "Example Lakes"
         for row in rows.values():
-            assert row["confirmation_number"].startswith("TEST-")
             assert row["amenity_count"] == "7"
             assert row["check_in_time"] == "4:00 PM"
+            assert row["quote_total"] == "$1,713.40"
+        # Columns the real site never publishes were dropped from the workbook.
+        assert "confirmation_number" not in rows["1906"], sorted(rows["1906"])
+        assert "rating" not in rows["1906"]
 
         for name in ("homes.xlsx", "homes.csv", "parsed.jsonl"):
             assert (workdir / name).exists(), f"missing {name}"

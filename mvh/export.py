@@ -149,9 +149,13 @@ def write_rag_corpus(records: list[Record], directory: Path) -> None:
     """One Markdown document per home: what you actually feed the RAG index."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    used: set[str] = set()
     for record in records:
         slug = str(record.get("house_number") or record.get("listing_id") or "unknown")
         slug = re.sub(r"[^A-Za-z0-9_-]", "_", slug)
+        if slug in used:                       # house numbers are not unique
+            slug = f"{slug}-{record.get('listing_id')}"
+        used.add(slug)
         parts = [_front_matter(record), ""]
         title = record.get("name") or f"Home {slug}"
         parts.append(f"# {title}")
@@ -184,9 +188,13 @@ def write_rag_corpus(records: list[Record], directory: Path) -> None:
             parts += ["", "## Quote / fees", ""]
             parts += [f"- **{label}:** {value}" for label, value in record.fees]
 
-        if record.extras:
+        letter = record.extras.get("confirmation_letter")
+        if letter:
+            parts += ["", "## Confirmation letter", "", str(letter)]
+        other = {k: v for k, v in record.extras.items() if k != "confirmation_letter"}
+        if other:
             parts += ["", "## Additional details", ""]
-            parts += [f"- **{key}:** {value}" for key, value in record.extras.items()]
+            parts += [f"- **{key}:** {value}" for key, value in other.items()]
 
         if str(record.get("quote_text", "")).strip():
             parts += ["", "## Confirmation letter / quote page", "",
@@ -198,4 +206,11 @@ def write_rag_corpus(records: list[Record], directory: Path) -> None:
         parts += ["", "---", f"Source: {record.get('url', '')}",
                   f"Captured: {record.get('scraped_at', '')}"]
         (directory / f"{slug}.md").write_text("\n".join(parts), encoding="utf-8")
-    log.info("wrote %d markdown documents to %s", len(records), directory)
+
+    # A doc left behind by an earlier run would keep answering questions about
+    # a home that has since been delisted, so drop anything not written now.
+    stale = [f for f in directory.glob("*.md") if f.stem not in used]
+    for path in stale:
+        path.unlink()
+    log.info("wrote %d markdown documents to %s (%d stale removed)",
+             len(records), directory, len(stale))

@@ -18,18 +18,22 @@ from .extract import (
 # Column order for the spreadsheet.
 FIELDS = [
     "house_number", "listing_id", "name", "property_type", "community",
-    "bedrooms", "bathrooms", "half_baths", "sleeps", "sqft", "floors",
-    "address", "city", "state", "zip", "country", "latitude", "longitude",
-    "pool", "pool_heat", "spa", "game_room", "grill", "wifi", "parking",
-    "pets", "smoking", "check_in_time", "check_out_time", "min_nights",
-    "rate", "rating", "review_count",
-    "confirmation_number", "quote_total", "quote_balance", "quote_deposit",
-    "quote_taxes", "cleaning_fee", "cancellation_policy",
-    "phone", "email",
+    "bedrooms", "bathrooms", "sleeps", "sqft",     "address", "city", "state", "zip", "country",
+    "pool", "pool_heat", "spa", "game_room", "grill", "wifi",
+    "pets", "smoking", "house_rules", "check_in_time", "check_out_time",
+    "rate",     "quote_total",     "quote_taxes", "cleaning_fee", "cancellation_policy",
+    "phone",
     "amenity_count", "amenities", "image_count", "primary_image",
     "description", "url", "quote_url", "scraped_at",
+    # site-specific columns (mastervacationhomes.com)
+    "quote_subtotal", "service_fee", "quote_nights", "quote_dates",
+    "wifi_network", "wifi_password", "door_code_rule", "gate_access",
+    "resort_address", "optional_services", "distances", "blocked_dates",
 ]
 
+# Numeric coercion is independent of the spreadsheet columns: the generic
+# extraction layer still reads these for other sites even where
+# mastervacationhomes.com never publishes them.
 NUMERIC_FIELDS = {
     "bedrooms", "bathrooms", "half_baths", "sleeps", "sqft", "floors",
     "min_nights", "latitude", "longitude", "rating", "review_count",

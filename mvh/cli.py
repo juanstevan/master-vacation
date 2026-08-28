@@ -15,6 +15,9 @@ from .fetch import fetch_all, raw_ids
 from .httpclient import PoliteSession
 from .parse import load_records, parse_raw_dir
 from .records import FIELDS, build_record
+from . import site
+
+log = logging.getLogger("mvh.cli")
 
 
 def build_settings(args) -> Settings:
@@ -217,6 +220,114 @@ def cmd_inspect(args) -> int:
     return 0
 
 
+def cmd_run(args) -> int:
+    """The real pipeline for mastervacationhomes.com (see mvh/site.py)."""
+    settings = build_settings(args)
+    out_dir = Path(args.out)
+    raw_dir = out_dir / "raw"
+    session = make_session(args, settings, raw_dir)
+    base = settings.base_url.rstrip("/")
+
+    ids = resolve_ids(args)
+    if not ids:
+        cached_ids = out_dir / "ids.json"
+        if cached_ids.exists() and not args.rediscover:
+            ids = json.loads(cached_ids.read_text(encoding="utf-8"))
+            print(f"Using {len(ids)} ids from {cached_ids} (--rediscover to refresh)")
+        else:
+            ids = site.discover_ids(session, settings)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            cached_ids.write_text(json.dumps(ids, indent=2), encoding="utf-8")
+            print(f"Discovered {len(ids)} homes -> {cached_ids}")
+    if args.limit:
+        ids = ids[: args.limit]
+    if not ids:
+        print("No home ids to work with.")
+        return 1
+
+    token = None
+    if not args.no_prices:
+        _, page = session.get(f"{base}/home/{ids[0]}/quote")
+        found = site.CSRF.search(page)
+        token = found.group(1) if found else None
+        if not token:
+            log.warning("no CSRF token found; continuing without live prices")
+
+    records, failures, quote_misses = [], [], 0
+    for index, home_id in enumerate(ids, 1):
+        try:
+            _, home_html = session.get(f"{base}/home/{home_id}",
+                                       cache_key=home_id, refresh=args.refresh)
+            _, quote_html = session.get(f"{base}/home/{home_id}/quote",
+                                        cache_key=f"{home_id}.quote",
+                                        refresh=args.refresh)
+            home = site.parse_home(home_html)
+            letter = site.parse_letter(quote_html)
+
+            quote = None
+            quote_cache = raw_dir / f"{home_id}.quote.json"
+            if quote_cache.exists() and not args.refresh:
+                quote = json.loads(quote_cache.read_text(encoding="utf-8")) or None
+            elif token:
+                window = site.pick_dates(home.get("_locks") or [])
+                if window:
+                    quote = site.fetch_quote_json(session, settings, home_id,
+                                                  token, window)
+                    if quote is None:
+                        quote_misses += 1
+                        # A long run can outlive the session; re-arm once and retry.
+                        if quote_misses % 5 == 0:
+                            found = site.CSRF.search(
+                                session.get(f"{base}/home/{home_id}/quote")[1])
+                            if found and found.group(1) != token:
+                                token = found.group(1)
+                                log.info("refreshed CSRF token")
+                                quote = site.fetch_quote_json(
+                                    session, settings, home_id, token, window)
+                    else:
+                        quote_misses = 0
+                    quote_cache.write_text(json.dumps(quote or {}), encoding="utf-8")
+
+            records.append(site.build_record(home_id, settings, home, letter, quote))
+        except Exception as exc:                      # one bad home must not stop 1000
+            log.warning("home %s failed: %s", home_id, exc)
+            failures.append((home_id, str(exc)))
+        if index % 25 == 0 or index == len(ids):
+            print(f"  ... {index}/{len(ids)} homes  ({len(failures)} failed)")
+
+    if failures:
+        (out_dir / "failures.txt").write_text(
+            "\n".join(f"{i}\t{e}" for i, e in failures), encoding="utf-8")
+    return _write_outputs(records, out_dir, args, failures)
+
+
+def _write_outputs(records, out_dir: Path, args, failures) -> int:
+    if not records:
+        print("Nothing to export.")
+        return 1
+    write_xlsx(records, out_dir / "homes.xlsx")
+    write_csv(records, out_dir / "homes.csv")
+    write_jsonl(records, out_dir / "parsed.jsonl")
+    if not args.no_rag:
+        write_rag_corpus(records, out_dir / "rag_corpus")
+
+    print(f"\nExported {len(records)} homes:")
+    for name in ("homes.xlsx", "homes.csv", "parsed.jsonl"):
+        print(f"  {out_dir / name}")
+    if not args.no_rag:
+        print(f"  {out_dir / 'rag_corpus'}/  ({len(records)} markdown docs)")
+    if failures:
+        print(f"  {out_dir / 'failures.txt'}  ({len(failures)} homes failed)")
+
+    print("\nColumn fill rates:")
+    for field in FIELDS:
+        if field in ("url", "quote_url", "scraped_at", "listing_id"):
+            continue
+        pct = 100.0 * sum(1 for r in records if str(r.get(field, "")).strip()) / len(records)
+        print(f"  {field:<22} {pct:5.1f}%  {'#' * int(pct / 5)}")
+    return 0
+
+
 def cmd_all(args) -> int:
     for step in (cmd_discover, cmd_fetch, cmd_parse, cmd_export):
         code = step(args)
@@ -272,6 +383,15 @@ def main(argv=None) -> int:
     p.add_argument("--file", help="a saved .html file instead of fetching")
     p.add_argument("--refresh", action="store_true")
     p.set_defaults(func=cmd_inspect)
+
+    p = subparsers.add_parser("run", help="the real mastervacationhomes.com pipeline")
+    add_id_args(p)
+    p.add_argument("--limit", type=int, help="only the first N homes (smoke test)")
+    p.add_argument("--refresh", action="store_true", help="ignore cached pages")
+    p.add_argument("--rediscover", action="store_true", help="re-walk /search")
+    p.add_argument("--no-prices", action="store_true", help="skip the getquote calls")
+    p.add_argument("--no-rag", action="store_true")
+    p.set_defaults(func=cmd_run)
 
     p = subparsers.add_parser("all", help="discover -> fetch -> parse -> export")
     add_id_args(p)
