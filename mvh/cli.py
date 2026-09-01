@@ -16,6 +16,7 @@ from .httpclient import PoliteSession
 from .parse import load_records, parse_raw_dir
 from .records import FIELDS, build_record
 from . import site
+from .jobber import cli as jobber_cli
 
 log = logging.getLogger("mvh.cli")
 
@@ -392,6 +393,10 @@ def main(argv=None) -> int:
     p.add_argument("--no-prices", action="store_true", help="skip the getquote calls")
     p.add_argument("--no-rag", action="store_true")
     p.set_defaults(func=cmd_run)
+
+    # Jobber is a different system entirely -- an authenticated GraphQL API
+    # rather than public web pages -- so it brings its own subcommands.
+    jobber_cli.register(subparsers)
 
     p = subparsers.add_parser("all", help="discover -> fetch -> parse -> export")
     add_id_args(p)

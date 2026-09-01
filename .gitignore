@@ -10,3 +10,9 @@ demo_data/
 *.csv
 
 .DS_Store
+
+# Jobber OAuth tokens. These live outside the repo by default; this is here in
+# case JOBBER_TOKEN_FILE is ever pointed inside it.
+jobber_token.json
+*.token.json
+.env

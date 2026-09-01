@@ -7,6 +7,11 @@ knowledge-base index for customer service.
 It reads the **public web pages** — the same ones a guest sees. No credentials,
 no database access, and it never books anything.
 
+A second, independent pipeline reads the maintenance jobs from **Jobber** over
+its authenticated API — see [Maintenance jobs from Jobber](#maintenance-jobs-from-jobber).
+That one does need credentials, and gets them via OAuth: no password is ever
+handled and nothing secret is stored in this repository.
+
 ## Run it
 
 ```bash
@@ -87,13 +92,126 @@ The **Data sources** tab tells you which page each value came from, so a wrong
 value is traceable to one parser. After a fix, `python -m mvh run` re-parses
 the cache — no re-downloading.
 
+## Maintenance jobs from Jobber
+
+A second, separate pipeline: `python -m mvh jobber ...` reads the maintenance
+jobs (PH ON/OFF, BBQ CLEAN, Guest Reports) out of Jobber's API.
+
+### Jobber has no API keys
+
+There is nothing to find in the Jobber web app, because Jobber does not issue
+API keys and its API has no password login. The only way in is OAuth 2.0
+against a GraphQL endpoint, and the two live in different places:
+
+| | |
+|---|---|
+| `secure.getjobber.com` | the web app people log into. No API surface. |
+| `developer.getjobber.com` | where an app, and its credentials, are created. |
+| `api.getjobber.com/api/graphql` | the API itself. |
+
+### One-time setup
+
+Done once, by a **Jobber admin** of the account:
+
+1. Create an app at `developer.getjobber.com`.
+2. Set its redirect URI to exactly `http://localhost:8123/oauth/callback`
+   (or set `JOBBER_REDIRECT_URI` to whatever you registered instead).
+3. Give it **read** scopes for jobs, clients and properties.
+4. Export the credentials it issues, then consent once in a browser:
+
+```bash
+export JOBBER_CLIENT_ID=...
+export JOBBER_CLIENT_SECRET=...
+python -m mvh jobber login
+```
+
+That stores a refresh token at `~/.config/mvh/jobber_token.json`, mode 0600,
+outside this repository. **No credential is ever written into the source
+tree.** On a server with no browser, authorize on a laptop and pass the code
+with `jobber login --code <code>`, or seed `JOBBER_REFRESH_TOKEN` — but point
+`JOBBER_TOKEN_FILE` somewhere writable too, because Jobber rotates the refresh
+token and the new one has to be saved or the next run cannot authenticate.
+
+### Run it
+
+```bash
+python -m mvh jobber probe               # is it working? which part is broken?
+python -m mvh jobber pull --months 24    # the backfill
+```
+
+`probe` checks each link in the chain separately — credentials present, token
+valid, API version accepted, jobs scope granted — and prints the remaining
+query budget, so a failure names the step that failed rather than "not
+loading".
+
+```bash
+python -m mvh jobber pull --max-pages 2   # smoke test before the real run
+python -m mvh jobber pull --months 36     # a wider window
+python -m mvh jobber pull --visits 0      # skip visits, cheaper per page
+python -m mvh jobber export               # re-export from cache, no API calls
+python -m mvh jobber status               # what the last pull got to
+python -m mvh jobber schema               # what this account actually exposes
+```
+
+Output lands in `data/jobber/`: `jobs.xlsx` (Jobs, Visits, Custom fields,
+Coverage), `jobs.csv`, `jobs.jsonl` (the full nested records), and `raw/` —
+one file per page fetched.
+
+### Why it is built this way
+
+**Volume is not the problem; an unbounded query is.** Jobber prices each
+query against a leaky bucket (10,000 points, refilling ~500/sec) and reports
+the balance on every response. A connection sent without `first:` is priced as
+if 100 nodes came back *at every level of nesting* — which is what actually
+gets a "give me all the jobs" query rejected, whether the account holds 500
+jobs or 500,000. Every connection here is bounded, and the client reads the
+returned balance and waits for the bucket to refill before it runs dry.
+
+**Access tokens expire after 60 minutes.** A full backfill takes longer than
+that, so the token is refreshed mid-run. This is the usual reason a naive
+backfill works on a 50-job test and dies two thirds of the way through a real
+one.
+
+**Pages are saved as they arrive.** An interrupted run resumes from its cursor
+rather than starting over; re-exporting never touches the API. If the query
+changes, the resume is abandoned rather than mixing two record shapes.
+
+**The query is built from the live schema.** Jobber pins behaviour to a dated
+API version and accounts differ in which optional fields they expose, so the
+field list in `mvh/jobber/jobs.py` is a wish list: anything this account does
+not have is dropped and named in the run summary, instead of a single unknown
+field rejecting the whole request.
+
+### Known open questions
+
+- `--months 24` is applied after fetching, because whether the window can move
+  server-side depends on the `filter` argument this account exposes.
+  `jobber schema` reports whether it is there; moving the window into the query
+  would cut a large backfill down and is the obvious next improvement.
+- `JOBBER_API_VERSION` defaults to `2025-01-20`. If that version has been
+  retired the server says so and lists the live ones — `probe` prints the
+  message and tells you which variable to set.
+- The `category` column (PH ON / PH OFF / BBQ CLEAN / GUEST REPORT / OTHER) is
+  a first pass that reads job titles. The Coverage sheet counts how many land
+  in OTHER; once real titles are in front of us the patterns in
+  `mvh/jobber/export.py` should be tightened, or replaced by a custom field if
+  the team records the problem type as structured data.
+
 ## Tests
 
 ```bash
 python3 tests/test_site.py       # 16 tests, every one a bug found on the live site
 python3 tests/test_extract.py    # 14 tests for the generic extraction layer
 python3 tests/test_pipeline.py   # end to end against a local fake site
+python3 tests/test_jobber.py     # 27 tests against a local fake Jobber API
 ```
+
+`test_jobber.py` runs the whole Jobber path — OAuth, refresh, pagination,
+throttling, export — against a fake API in `tests/fixtures/fake_jobber.py`, so
+it needs no credentials. Each test stands for something that breaks a real
+backfill: a token that dies at minute 61, a rotated refresh token that was
+never saved, an unbounded query, a field the account does not have, a run
+interrupted at page 400.
 
 ## One note
 
