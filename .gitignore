@@ -2,11 +2,12 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-
-# Crawl output: raw HTML, spreadsheets, RAG corpus. Regenerate, don't commit.
-data/
-demo_data/
-*.xlsx
-*.csv
-
 .DS_Store
+demo_data/
+
+# 135 MB of saved page HTML: a re-run cache, not a deliverable.
+# Regenerate with `python -m mvh run`.
+data/raw/
+
+# Redundant local archives (the contents are tracked above).
+/*.zip
