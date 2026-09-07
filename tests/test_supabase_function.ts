@@ -285,6 +285,66 @@ await test("health is green once connected", async () => {
   assert(body.ok === true && body.jobber_connected === true, JSON.stringify(body));
 });
 
+await test("uses the new sb_secret key when Supabase provides one", async () => {
+  // Supabase retires the legacy service_role key at the end of 2026; both are
+  // injected during the changeover and the new one has to win.
+  const seen: Array<Record<string, string>> = [];
+  const previous = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === "string" ? input : input.toString());
+    if (url.origin === new URL(SUPABASE_URL).origin) {
+      seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+    }
+    return previous(input, init);
+  }) as typeof fetch;
+  config.SUPABASE_SECRET_KEYS = JSON.stringify({ default: "sb_secret_abc123" });
+  try {
+    await call("/health");
+    assert(seen.length > 0, "no request reached PostgREST");
+    assert(seen[0].apikey === "sb_secret_abc123",
+      `apikey was ${seen[0].apikey}, expected the new secret key`);
+    assert(!("authorization" in seen[0]),
+      "an sb_secret key must not be sent as a bearer token -- it is not a JWT");
+  } finally {
+    delete (config as Record<string, string | undefined>).SUPABASE_SECRET_KEYS;
+    globalThis.fetch = previous;
+  }
+});
+
+await test("still sends the legacy service_role key as a bearer token", async () => {
+  const seen: Array<Record<string, string>> = [];
+  const previous = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === "string" ? input : input.toString());
+    if (url.origin === new URL(SUPABASE_URL).origin) {
+      seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+    }
+    return previous(input, init);
+  }) as typeof fetch;
+  const saved = config.SUPABASE_SERVICE_ROLE_KEY;
+  config.SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiJ9.legacy.jwt";
+  try {
+    await call("/health");
+    assert(seen[0].authorization === `Bearer ${config.SUPABASE_SERVICE_ROLE_KEY}`,
+      "a legacy JWT key should still go on the Authorization header");
+  } finally {
+    config.SUPABASE_SERVICE_ROLE_KEY = saved;
+    globalThis.fetch = previous;
+  }
+});
+
+await test("malformed SUPABASE_SECRET_KEYS falls back instead of dying", async () => {
+  config.SUPABASE_SECRET_KEYS = "not json at all";
+  try {
+    const resp = await call("/health");
+    const body = await resp.json();
+    assert(!body.missing_config.some((n: string) => n.includes("SECRET_KEYS")),
+      "should have fallen back to the legacy key, not reported it missing");
+  } finally {
+    delete (config as Record<string, string | undefined>).SUPABASE_SECRET_KEYS;
+  }
+});
+
 await test("unknown routes 404 instead of doing something surprising", async () => {
   await connect();
   assert((await call("/nope")).status === 404, "unknown path");

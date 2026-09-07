@@ -38,7 +38,27 @@ const tokenKey = () => env("MVH_TOKEN_KEY");
 const stateSecret = () => env("MVH_STATE_SECRET");
 
 const supabaseUrl = () => env("SUPABASE_URL");
-const serviceKey = () => env("SUPABASE_SERVICE_ROLE_KEY");
+
+/** The key that lets this function bypass RLS on the tokens table.
+ *
+ *  Supabase is retiring the legacy `service_role` key at the end of 2026 in
+ *  favour of `sb_secret_...` keys, delivered as a JSON map in
+ *  SUPABASE_SECRET_KEYS. Both are injected during the changeover, so prefer
+ *  the new one and fall back to the old, and this keeps working either side
+ *  of the switch without anyone having to remember to edit it. */
+const serviceKey = () => {
+  const raw = env("SUPABASE_SECRET_KEYS");
+  if (raw) {
+    try {
+      const keys = JSON.parse(raw);
+      const key = keys?.default ?? Object.values(keys ?? {})[0];
+      if (typeof key === "string" && key) return key;
+    } catch {
+      // Malformed: fall through to the legacy variable rather than dying.
+    }
+  }
+  return env("SUPABASE_SERVICE_ROLE_KEY");
+};
 
 const ROW_ID = "default";
 const TABLE = "jobber_oauth";
@@ -128,11 +148,18 @@ type Row = {
   locked_until: string;
 };
 
-const restHeaders = () => ({
-  "apikey": serviceKey(),
-  "authorization": `Bearer ${serviceKey()}`,
-  "content-type": "application/json",
-});
+const restHeaders = () => {
+  const key = serviceKey();
+  const headers: Record<string, string> = {
+    "apikey": key,
+    "content-type": "application/json",
+  };
+  // A legacy service_role key is a JWT and PostgREST wants it as a bearer
+  // token as well. The new sb_secret_... keys are not JWTs -- sending one as
+  // a bearer token makes PostgREST try to verify it as a JWT and reject it.
+  if (key.startsWith("ey")) headers["authorization"] = `Bearer ${key}`;
+  return headers;
+};
 
 async function readRow(): Promise<Row | null> {
   const select = "access_token,refresh_token,expires_at,scope,locked_until";
@@ -266,7 +293,7 @@ function missingConfig(): string[] {
     MVH_TOKEN_KEY: tokenKey(),
     MVH_STATE_SECRET: stateSecret(),
     SUPABASE_URL: supabaseUrl(),
-    SUPABASE_SERVICE_ROLE_KEY: serviceKey(),
+    "SUPABASE_SECRET_KEYS or SUPABASE_SERVICE_ROLE_KEY": serviceKey(),
   }).filter(([, value]) => !value).map(([name]) => name);
 }
 
