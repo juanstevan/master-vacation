@@ -109,7 +109,7 @@ against a GraphQL endpoint, and the two live in different places:
 | `developer.getjobber.com` | where an app, and its credentials, are created. |
 | `api.getjobber.com/api/graphql` | the API itself. |
 
-### One-time setup
+### Option A: one-time setup on your own machine
 
 Done once, by a **Jobber admin** of the account:
 
@@ -131,6 +131,59 @@ tree.** On a server with no browser, authorize on a laptop and pass the code
 with `jobber login --code <code>`, or seed `JOBBER_REFRESH_TOKEN` — but point
 `JOBBER_TOKEN_FILE` somewhere writable too, because Jobber rotates the refresh
 token and the new one has to be saved or the next run cannot authenticate.
+
+### Option B: Supabase, when localhost will not do
+
+If the Jobber app cannot use a `localhost` redirect URI — or the person who can
+consent is not the person who runs the pull — deploy the Edge Function in
+`supabase/functions/jobber-auth`. It becomes the redirect URI, and it is a
+better place for the credentials than a laptop: the client secret and the
+refresh token stay in Supabase, and the machine running the pull holds neither.
+
+```bash
+supabase link --project-ref <your-project-ref>
+supabase db push                       # creates the jobber_oauth table
+
+# Merge supabase/config.toml.example into supabase/config.toml, then:
+supabase secrets set \
+  JOBBER_CLIENT_ID=...        \
+  JOBBER_CLIENT_SECRET=...    \
+  JOBBER_REDIRECT_URI=https://<ref>.supabase.co/functions/v1/jobber-auth/callback \
+  MVH_ADMIN_KEY=$(openssl rand -hex 32)   \
+  MVH_TOKEN_KEY=$(openssl rand -hex 32)   \
+  MVH_STATE_SECRET=$(openssl rand -hex 32)
+
+supabase functions deploy jobber-auth
+```
+
+Register that same `JOBBER_REDIRECT_URI` on the app in the Developer Center —
+it has to match character for character. Then a **Jobber admin** opens this
+once in a browser:
+
+```
+https://<ref>.supabase.co/functions/v1/jobber-auth/start?key=<MVH_ADMIN_KEY>
+```
+
+On the machine that pulls the data, that is the whole configuration:
+
+```bash
+export JOBBER_TOKEN_ENDPOINT=https://<ref>.supabase.co/functions/v1/jobber-auth/token
+export JOBBER_TOKEN_KEY=<MVH_TOKEN_KEY>
+python -m mvh jobber probe
+```
+
+`probe` reports `auth mode remote` and confirms no Jobber credential is needed
+locally. `curl https://<ref>.supabase.co/functions/v1/jobber-auth/health` says
+what is configured and whether a grant is stored, naming missing secrets but
+never printing their values.
+
+**The function is public and knows it.** Jobber's redirect is a plain browser
+request that cannot carry a Supabase JWT, so it deploys with
+`verify_jwt = false` — which means it authenticates every caller itself:
+`/start` needs `MVH_ADMIN_KEY`, `/callback` accepts only a `state` value it
+signed itself (HMAC, 15-minute expiry), and `/token` needs `MVH_TOKEN_KEY`.
+All three comparisons are constant-time. The tokens table has RLS on with no
+policies at all, so nothing but the service role can read it.
 
 ### Run it
 
@@ -203,7 +256,8 @@ field rejecting the whole request.
 python3 tests/test_site.py       # 16 tests, every one a bug found on the live site
 python3 tests/test_extract.py    # 14 tests for the generic extraction layer
 python3 tests/test_pipeline.py   # end to end against a local fake site
-python3 tests/test_jobber.py     # 27 tests against a local fake Jobber API
+python3 tests/test_jobber.py     # 33 tests against a local fake Jobber API
+bun tests/test_supabase_function.ts   # 17 tests for the Supabase function
 ```
 
 `test_jobber.py` runs the whole Jobber path — OAuth, refresh, pagination,
@@ -212,6 +266,11 @@ it needs no credentials. Each test stands for something that breaks a real
 backfill: a token that dies at minute 61, a rotated refresh token that was
 never saved, an unbounded query, a field the account does not have, a run
 interrupted at page 400.
+
+`test_supabase_function.ts` runs the Edge Function's handler directly against
+an in-memory stand-in for Postgres and a fake Jobber, so the consent flow, the
+key checks, the signed state and the refresh lease are all exercised without
+deploying anything. It runs under `bun` or `deno run -A`.
 
 ## One note
 

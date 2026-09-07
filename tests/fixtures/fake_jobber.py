@@ -171,6 +171,10 @@ class FakeJobber:
         self.expire_after_calls = None      # the access token dies after N calls
         self.expired_yet = False
         self.jobs_queries = 0
+        # Stands in for the deployed Supabase Edge Function's /token route.
+        self.token_key = "supabase-shared-key"
+        self.token_endpoint_calls = 0
+        self.forced_calls = 0
         self.throttle_on_call = set()       # GraphQL THROTTLED on these calls
         self.http_429_on_call = set()
         self.available_points = 10000
@@ -227,11 +231,39 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ post
     def do_POST(self):                                          # noqa: N802
-        if self.path.endswith("/oauth/token"):
+        path = self.path.split("?")[0]
+        if path.endswith("/oauth/token"):
             return self._token()
-        if self.path.endswith("/graphql"):
+        if path.endswith("/jobber-auth/token"):
+            return self._remote_token()
+        if path.endswith("/graphql"):
             return self._graphql()
         self.send_error(404)
+
+    # ------------------------------------------------- supabase edge function
+    def _remote_token(self):
+        """What mvh/jobber/remote_auth.py talks to: a shared-key endpoint that
+        hands back an access token and never reveals the refresh token."""
+        state = self.state
+        self._read()
+        if self.headers.get("x-mvh-key") != state.token_key:
+            return self._json({"error": "unauthorized"}, 401)
+        force = "force=true" in self.path
+        with state.lock:
+            state.token_endpoint_calls += 1
+            if force:
+                state.forced_calls += 1
+                state.access_token = f"access-remote-{state.token_endpoint_calls}"
+            elif not state.access_token:
+                state.access_token = "access-remote-1"
+            token = state.access_token
+        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        return self._json({
+            "access_token": token,
+            "expires_at": expires.isoformat().replace("+00:00", "Z"),
+            "scope": "read_jobs read_clients",
+            "refreshed": force,
+        })
 
     # ----------------------------------------------------------------- oauth
     def _token(self):

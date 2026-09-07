@@ -10,12 +10,18 @@ from .auth import JobberAuth, JobberAuthError
 from .client import JobberClient, JobberError
 from .config import JobberSettings
 from .jobs import load_pages, months_ago, pull_jobs
+from .remote_auth import build_auth
 
 log = logging.getLogger("mvh.jobber.cli")
 
 SETUP_HELP = """
 Jobber has no API keys and no password login for its API -- the only way in is
-OAuth. One-time setup, done by a Jobber ADMIN of the account:
+OAuth. One-time setup, done by a Jobber ADMIN of the account.
+
+If your Jobber app cannot use a localhost redirect URI, deploy the Supabase
+Edge Function in supabase/functions/jobber-auth instead (see the README) and
+set JOBBER_TOKEN_ENDPOINT -- then no credential is needed on this machine at
+all. Otherwise:
 
   1. Sign in at developer.getjobber.com and create an app.
   2. Set its redirect URI to exactly:
@@ -45,11 +51,33 @@ def _out_dir(args) -> Path:
 
 
 def _client(settings: JobberSettings) -> JobberClient:
-    return JobberClient(settings, JobberAuth(settings))
+    return JobberClient(settings, build_auth(settings))
+
+
+REMOTE_SETUP_HELP = """
+This machine is in remote mode: JOBBER_TOKEN_ENDPOINT is set, so access tokens
+come from the Supabase Edge Function and nothing secret lives here.
+
+Consent therefore happens at the function, not on this machine. A Jobber ADMIN
+opens this once in a browser:
+
+  {start_url}?key=<the MVH_ADMIN_KEY secret>
+
+Then come back and run: python -m mvh jobber probe
+"""
+
+
+def _start_url(settings: JobberSettings) -> str:
+    endpoint = settings.token_endpoint
+    return (endpoint[: -len("/token")] if endpoint.endswith("/token")
+            else endpoint) + "/start"
 
 
 def cmd_login(args) -> int:
     settings = _settings(args)
+    if settings.remote:
+        print(REMOTE_SETUP_HELP.format(start_url=_start_url(settings)))
+        return 0
     missing = settings.missing_credentials()
     if missing:
         print(SETUP_HELP.format(redirect=settings.redirect_uri,
@@ -79,26 +107,42 @@ def cmd_probe(args) -> int:
     print("=" * 60)
     print(f"  endpoint      {settings.api_url}")
     print(f"  api version   {settings.api_version}")
-    print(f"  token file    {settings.token_file}")
 
     missing = settings.missing_credentials()
-    print(f"  client id     {'set' if settings.client_id else 'MISSING'}")
-    print(f"  client secret {'set' if settings.client_secret else 'MISSING'}")
-    if missing:
-        print(SETUP_HELP.format(redirect=settings.redirect_uri,
-                                token_file=settings.token_file))
-        return 2
+    if settings.remote:
+        print(f"  auth mode     remote (Supabase); no Jobber secret on this machine")
+        print(f"  token source  {settings.token_endpoint}")
+        print(f"  shared key    {'set' if settings.token_endpoint_key else 'MISSING'}")
+        if missing:
+            print(REMOTE_SETUP_HELP.format(start_url=_start_url(settings)))
+            print(f"Missing right now: {', '.join(missing)}")
+            return 2
+    else:
+        print(f"  auth mode     local OAuth grant")
+        print(f"  token file    {settings.token_file}")
+        print(f"  client id     {'set' if settings.client_id else 'MISSING'}")
+        print(f"  client secret {'set' if settings.client_secret else 'MISSING'}")
+        if missing:
+            print(SETUP_HELP.format(redirect=settings.redirect_uri,
+                                    token_file=settings.token_file))
+            return 2
 
-    auth = JobberAuth(settings)
-    if not auth.token.refresh_token:
+    auth = build_auth(settings)
+    if not settings.remote and not auth.token.refresh_token:
         print("\n  refresh token MISSING -- run: python -m mvh jobber login")
         return 2
-    print("  refresh token set")
+    if not settings.remote:
+        print("  refresh token set")
 
     client = JobberClient(settings, auth)
     try:
         client.execute("query Ping { __typename }")
-    except (JobberError, JobberAuthError) as exc:
+    except JobberAuthError as exc:
+        where = ("getting a token from the Supabase function"
+                 if settings.remote else "authenticating with Jobber")
+        print(f"\nFailed while {where}:\n\n{exc}\n")
+        return 1
+    except JobberError as exc:
         print(f"\nThe API rejected the request:\n\n{exc}\n")
         return 1
     print("\n  authentication OK, API version accepted")

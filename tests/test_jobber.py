@@ -29,6 +29,7 @@ from mvh.jobber.export import (categorize, custom_field_pairs, to_row,  # noqa: 
                                write_all)
 from mvh.jobber.jobs import (build_jobs_query, in_window, load_pages,  # noqa: E402
                              months_ago, parse_time, pull_jobs)
+from mvh.jobber.remote_auth import RemoteAuth, build_auth  # noqa: E402
 
 TEMP_DIRS: list[Path] = []
 
@@ -392,6 +393,107 @@ def test_export_survives_jobs_missing_optional_pieces():
     workdir = _tempdir()
     write_all([{"id": "j1", "title": "x"}], workdir)
     assert (workdir / "jobs.xlsx").exists()
+
+
+# ------------------------------------------------------------- remote (supabase)
+def _remote_settings(base: str, workdir: Path, key: str) -> JobberSettings:
+    """Configured the way a machine is when the grant lives in Supabase: a
+    shared key and an endpoint, and no Jobber credential at all."""
+    return JobberSettings(
+        api_url=f"{base}/api/graphql",
+        token_endpoint=f"{base}/functions/v1/jobber-auth/token",
+        token_endpoint_key=key,
+        api_version="2025-01-20",
+        token_file=workdir / "unused.json",
+        delay=0.0, page_size=50, timeout=10.0,
+    )
+
+
+def test_remote_mode_needs_no_jobber_credentials():
+    settings = JobberSettings(token_endpoint="https://x/token",
+                              token_endpoint_key="k")
+    assert settings.remote
+    assert settings.missing_credentials() == [], "remote mode needs no client id"
+    assert isinstance(build_auth(settings), RemoteAuth)
+    # Without the shared key the public endpoint would just refuse us.
+    assert JobberSettings(token_endpoint="https://x/token").missing_credentials() \
+        == ["JOBBER_TOKEN_KEY"]
+    # No endpoint configured: fall back to the local OAuth grant.
+    assert not JobberSettings(client_id="a", client_secret="b").remote
+
+
+def test_remote_auth_never_holds_a_refresh_token():
+    state = FakeJobber()
+    server, base = serve(state)
+    workdir = _tempdir()
+    try:
+        auth = RemoteAuth(_remote_settings(base, workdir, state.token_key))
+        token = auth.access_token()
+        assert token and token.startswith("access"), token
+        assert auth.token.refresh_token == "", \
+            "the refresh token must never reach this machine"
+        assert state.token_endpoint_calls == 1
+        # A token with an hour left is reused rather than re-fetched.
+        assert auth.access_token() == token
+        assert state.token_endpoint_calls == 1
+    finally:
+        server.shutdown()
+
+
+def test_remote_force_refresh_asks_for_a_new_token():
+    state = FakeJobber()
+    server, base = serve(state)
+    workdir = _tempdir()
+    try:
+        auth = RemoteAuth(_remote_settings(base, workdir, state.token_key))
+        first = auth.access_token()
+        second = auth.force_refresh()
+        assert state.forced_calls == 1, "force should reach the endpoint"
+        assert second != first, "force should yield a different token"
+    finally:
+        server.shutdown()
+
+
+def test_remote_auth_explains_a_rejected_key():
+    state = FakeJobber()
+    server, base = serve(state)
+    workdir = _tempdir()
+    try:
+        auth = RemoteAuth(_remote_settings(base, workdir, "wrong-key"))
+        try:
+            auth.access_token()
+            raise AssertionError("a wrong shared key should fail")
+        except Exception as exc:
+            assert "JOBBER_TOKEN_KEY" in str(exc), str(exc)
+            assert "MVH_TOKEN_KEY" in str(exc), "should name the secret to compare"
+    finally:
+        server.shutdown()
+
+
+def test_remote_auth_explains_an_unreachable_endpoint():
+    workdir = _tempdir()
+    settings = _remote_settings("http://127.0.0.1:1", workdir, "k")
+    try:
+        RemoteAuth(settings).access_token()
+        raise AssertionError("an unreachable endpoint should fail")
+    except Exception as exc:
+        assert "could not reach" in str(exc), str(exc)
+
+
+def test_pull_works_end_to_end_through_the_remote_endpoint():
+    """The whole point: a full pull with no Jobber credential on this machine."""
+    state = FakeJobber()
+    server, base = serve(state)
+    workdir = _tempdir()
+    try:
+        settings = _remote_settings(base, workdir, state.token_key)
+        client = JobberClient(settings, build_auth(settings))
+        result = pull_jobs(client, workdir, months=24, page_size=50, now=NOW)
+        assert result.complete and result.fetched == 250
+        assert 175 <= result.kept <= 190, result.kept
+        assert state.token_endpoint_calls >= 1
+    finally:
+        server.shutdown()
 
 
 # --------------------------------------------------------------- end to end

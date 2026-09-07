@@ -1,0 +1,13 @@
+# Merge this section into your supabase/config.toml.
+#
+# Jobber redirects a plain browser to the callback, and that redirect cannot
+# carry a Supabase JWT, so JWT verification has to be off for this function.
+#
+# That makes the function PUBLIC, so it authenticates callers itself:
+#   /start    requires MVH_ADMIN_KEY
+#   /callback accepts only a state value it signed with MVH_STATE_SECRET
+#   /token    requires MVH_TOKEN_KEY
+# Read index.ts before changing any of that.
+
+[functions.jobber-auth]
+verify_jwt = false

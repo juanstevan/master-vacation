@@ -62,6 +62,10 @@ class JobberSettings:
     api_version: str = DEFAULT_API_VERSION
     redirect_uri: str = DEFAULT_REDIRECT_URI
     token_file: Path = None            # type: ignore[assignment]
+    # Set these to get access tokens from the Supabase Edge Function instead of
+    # holding a Jobber grant locally (see mvh/jobber/remote_auth.py).
+    token_endpoint: str = ""
+    token_endpoint_key: str = ""
     page_size: int = DEFAULT_PAGE_SIZE
     cost_floor: int = DEFAULT_COST_FLOOR
     delay: float = DEFAULT_DELAY
@@ -80,13 +84,25 @@ class JobberSettings:
             api_version=os.environ.get("JOBBER_API_VERSION", DEFAULT_API_VERSION),
             redirect_uri=os.environ.get("JOBBER_REDIRECT_URI", DEFAULT_REDIRECT_URI),
             token_file=_default_token_file(),
+            token_endpoint=os.environ.get("JOBBER_TOKEN_ENDPOINT", "").strip(),
+            token_endpoint_key=os.environ.get("JOBBER_TOKEN_KEY", "").strip(),
         )
         for key, value in overrides.items():
             if value is not None:
                 setattr(settings, key, value)
         return settings
 
+    @property
+    def remote(self) -> bool:
+        """True when tokens come from the Supabase function rather than from a
+        client id and secret held on this machine."""
+        return bool(self.token_endpoint)
+
     def missing_credentials(self) -> list[str]:
+        if self.remote:
+            # Nothing local is needed but the shared key: the client secret
+            # lives in Supabase.
+            return [] if self.token_endpoint_key else ["JOBBER_TOKEN_KEY"]
         return [name for name, value in
                 (("JOBBER_CLIENT_ID", self.client_id),
                  ("JOBBER_CLIENT_SECRET", self.client_secret)) if not value]
