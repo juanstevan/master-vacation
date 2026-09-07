@@ -480,6 +480,62 @@ def test_remote_auth_explains_an_unreachable_endpoint():
         assert "could not reach" in str(exc), str(exc)
 
 
+class _StubResponse:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+        self.text = json.dumps(payload)
+
+    def json(self):
+        return self._payload
+
+
+class _StubSession:
+    """Stands in for the deployed endpoint so the response contract can be
+    checked without a server."""
+
+    def __init__(self, payload, status=200):
+        self.payload, self.status = payload, status
+        self.headers = {}
+        self.calls = []
+
+    def post(self, url, timeout=None, headers=None):
+        self.calls.append((url, headers or {}))
+        return _StubResponse(self.payload, self.status)
+
+
+def test_remote_auth_accepts_a_bare_pipedream_response():
+    """Pipedream returns access_token and little else -- no refresh metadata,
+    possibly no scope. That must be enough."""
+    settings = JobberSettings(token_endpoint="https://pipedream.test/token",
+                              token_endpoint_key="k")
+    session = _StubSession({"access_token": "pd-token"})
+    auth = RemoteAuth(settings, session=session)
+    assert auth.access_token() == "pd-token"
+    assert auth.token.scope == ""
+    # No expires_at given: assume a short life rather than treating it as
+    # already expired (which would refetch on every single request).
+    assert not auth.token.expired
+    assert session.calls[0][1]["x-mvh-key"] == "k", "the shared key must be sent"
+
+
+def test_remote_auth_survives_an_unparseable_expiry():
+    settings = JobberSettings(token_endpoint="https://pipedream.test/token",
+                              token_endpoint_key="k")
+    auth = RemoteAuth(settings, session=_StubSession(
+        {"access_token": "pd-token", "expires_at": "whenever"}))
+    assert auth.access_token() == "pd-token"
+    assert not auth.token.expired
+
+
+def test_remote_auth_force_hits_the_endpoint_with_the_force_flag():
+    settings = JobberSettings(token_endpoint="https://pipedream.test/token",
+                              token_endpoint_key="k")
+    session = _StubSession({"access_token": "pd-token"})
+    RemoteAuth(settings, session=session).force_refresh()
+    assert session.calls[0][0].endswith("?force=true"), session.calls[0][0]
+
+
 def test_pull_works_end_to_end_through_the_remote_endpoint():
     """The whole point: a full pull with no Jobber credential on this machine."""
     state = FakeJobber()

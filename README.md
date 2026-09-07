@@ -132,10 +132,29 @@ with `jobber login --code <code>`, or seed `JOBBER_REFRESH_TOKEN` — but point
 `JOBBER_TOKEN_FILE` somewhere writable too, because Jobber rotates the refresh
 token and the new one has to be saved or the next run cannot authenticate.
 
-### Option B: Supabase, when localhost will not do
+### Option B: Pipedream — simplest, and no Jobber app needed
 
-If the Jobber app cannot use a `localhost` redirect URI — or the person who can
-consent is not the person who runs the pull — deploy the Edge Function in
+Pipedream owns the Jobber OAuth app, so there is **no developer app to create,
+no redirect URI to register, and no client secret or refresh token anywhere**.
+Connect the account once in the Pipedream UI and it keeps the tokens fresh.
+
+Paste `pipedream/jobber-token.js` into a Node.js step behind an HTTP trigger,
+connect Jobber, set one environment variable, deploy. Then on the machine that
+pulls:
+
+```bash
+export JOBBER_TOKEN_ENDPOINT=https://eoXXXXXXXXXXXX.m.pipedream.net
+export JOBBER_TOKEN_KEY=<the shared key you set on the workflow>
+python -m mvh jobber probe
+```
+
+**[pipedream/README.md](pipedream/README.md) has the click-by-click version**,
+including what each failure message means.
+
+### Option C: Supabase, if you would rather host it yourself
+
+Same idea as Option B but on your own infrastructure, and it does use your own
+Jobber developer app. Deploy the Edge Function in
 `supabase/functions/jobber-auth`. It becomes the redirect URI, and it is a
 better place for the credentials than a laptop: the client secret and the
 refresh token stay in Supabase, and the machine running the pull holds neither.
@@ -256,8 +275,9 @@ field rejecting the whole request.
 python3 tests/test_site.py       # 16 tests, every one a bug found on the live site
 python3 tests/test_extract.py    # 14 tests for the generic extraction layer
 python3 tests/test_pipeline.py   # end to end against a local fake site
-python3 tests/test_jobber.py     # 33 tests against a local fake Jobber API
-bun tests/test_supabase_function.ts   # 17 tests for the Supabase function
+python3 tests/test_jobber.py          # 36 tests against a local fake Jobber API
+bun tests/test_pipedream_workflow.js  # 6 tests for the Pipedream workflow
+bun tests/test_supabase_function.ts   # 20 tests for the Supabase function
 ```
 
 `test_jobber.py` runs the whole Jobber path — OAuth, refresh, pagination,
